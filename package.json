@@ -1,0 +1,45 @@
+{
+  "name": "dsh-chain-check",
+  "version": "0.1.0",
+  "description": "一条命令查清 DSH → 桥接 → SnowLuma/OneBot → QQ 这条链断在哪一段。零依赖，附带 chain_check 工具。",
+  "type": "module",
+  "license": "MIT",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./check.mjs": "./check.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "check.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "diagnostics",
+    "onebot",
+    "napcat",
+    "astrbot",
+    "snowluma"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wuying1630/dsh-chain-check.git"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.2.x": "compatible"
+      }
+    }
+  }
+}
