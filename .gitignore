@@ -1,0 +1,4 @@
+node_modules/
+chain.config.json
+*.log
+.DS_Store
