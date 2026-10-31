@@ -350,9 +350,16 @@ if (JSON_OUT) {
     console.log(`  ${r.ok ? '✓' : '✗'}  ${pad(r.name, 22)} ${r.detail}`)
     if (!r.ok && r.fix) console.log(`     → ${r.fix}`)
   }
-  if (guesses.length) {
+  // 已经设了 skip 的栈就别再报「用了猜的路径」——那条路径它根本不用，报了只会让人以为要找它。
+  const cfgNow = loadCfg()
+  const shown = guesses.filter((g) => {
+    if (cfgNow.skipSurfcore && /surfcore/.test(g)) return false
+    if (cfgNow.skipOneBot && /SnowLuma/.test(g)) return false
+    return true
+  })
+  if (shown.length) {
     console.log('')
-    for (const g of guesses) console.log(`  · ${g}`)
+    for (const g of shown) console.log(`  · ${g}`)
   }
   const bad = results.filter((r) => !r.ok).length
   console.log('')
