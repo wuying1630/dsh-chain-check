@@ -17,12 +17,14 @@ import { fileURLToPath } from 'node:url'
 import { homedir, platform } from 'node:os'
 import { execSync } from 'node:child_process'
 import net from 'node:net'
+import http from 'node:http'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CFG_PATH = join(HERE, 'chain.config.json')
 const IS_WIN = platform() === 'win32'
 const JSON_OUT = process.argv.includes('--json')
 const WANT_HELP = process.argv.includes('--help') || process.argv.includes('-h')
+const WANT_FIX = process.argv.includes('--fix')
 
 // ── 换个 Node 版本就跑不动的话，得先说人话，别甩一串 SyntaxError ─────────────
 const NODE_MAJOR = Number(process.versions.node.split('.')[0])
@@ -38,6 +40,7 @@ dsh-chain-check —— 看 DSH → 桥接 → SnowLuma → QQ 这条链断在哪
 
   node check.mjs            人看的
   node check.mjs --json     机器看的（退出码 0 = 全通，1 = 有不通的）
+  node check.mjs --fix      能自动修的顺手修掉（改 baseUrl、拉起桥接、去掉重复 SnowLuma）
   node check.mjs --help     这段
 
 可选配置：同目录 chain.config.json，或者环境变量
@@ -112,6 +115,39 @@ async function httpJson(url, body = {}, token = '', wait = 4000) {
 const results = []
 const add = (key, name, ok, detail, fix = '') => results.push({ key, name, ok, detail, fix })
 
+// 探针：netstat 看不见端口时，靠「能不能回答 DSH 特征请求」认。
+// GET /dsh-world/console/snapshot 返回里带 "worldId" 就是它。
+// 不靠端口号猜、不靠进程名——SnowLuma 的 3000 也监听，但它答不出这个。
+function probeDshPort(port) {
+  return new Promise((resolve) => {
+    const req = http.get(
+      { host: '127.0.0.1', port, path: '/dsh-world/console/snapshot', timeout: 700 },
+      (res) => {
+        let body = ''
+        res.on('data', (c) => { body += c; if (body.length > 4000) req.destroy() })
+        res.on('end', () => resolve(body.includes('"worldId"') ? port : null))
+        res.on('error', () => resolve(null))
+      },
+    )
+    req.on('timeout', () => { req.destroy(); resolve(null) })
+    req.on('error', () => resolve(null))
+  })
+}
+
+async function scanDshPort() {
+  const all = []
+  for (let p = 1000; p <= 65535; p++) all.push(p)
+  let i = 0
+  const found = []
+  await Promise.all(Array.from({ length: 400 }, async () => {
+    while (i < all.length) {
+      const p = all[i++]
+      if (await probeDshPort(p)) found.push(p)
+    }
+  }))
+  return found.sort((x, y) => x - y)[0] ?? null
+}
+
 // 1) DSH 进程 + 端口
 async function checkDSH() {
   let pids = []
@@ -161,6 +197,21 @@ async function checkDSH() {
       const m = line.match(/[:.](\d{2,5})\s/)
       const p = line.match(/pid=(\d+)/)
       if (m && p && idSet.has(Number(p[1]))) ports.push(Number(m[1]))
+    }
+  }
+  // 两条路都看不见端口，别硬说「查不到」——用特征探针认（慢，但准）。
+  // 这不是链子断了，是探针看不见；报「查不到端口」比报错更误导人。
+  if (!ports.length) {
+    const cfgNow = loadCfg()
+    if (cfgNow.dshPort) {
+      ports = [Number(cfgNow.dshPort)]
+      guesses.push(`DSH 端口用了 chain.config.json 的 dshPort=${cfgNow.dshPort}`)
+    } else {
+      const found = await scanDshPort()
+      if (found) {
+        ports = [found]
+        guesses.push(`DSH 端口是探针扫出来的：${found}（netstat 看不见它，建议写进 chain.config.json 的 dshPort）`)
+      }
     }
   }
   ports = [...new Set(ports)]
@@ -364,6 +415,30 @@ if (JSON_OUT) {
   const bad = results.filter((r) => !r.ok).length
   console.log('')
   console.log(bad ? `  ${bad} 项不通。按 ✗ 后面的 → 一条条弄。` : '  全通。')
+  console.log('')
+}
+
+if (WANT_FIX && results.some((r) => !r.ok)) {
+  const { fixBaseUrl, ensureBridge } = await import('./lib/fix.js')
+  const done = []
+  const surfDir = SURF.path
+  if (surfDir && ports?.[0]) {
+    const r = fixBaseUrl(join(surfDir, 'config.json'), ports[0])
+    if (r === 'changed') done.push(`dsh.baseUrl → http://127.0.0.1:${ports[0]}`)
+    else if (r === 'bad-json') done.push(`${join(surfDir, 'config.json')} 不是合法 JSON，没敢动`)
+  }
+  if (surfDir) {
+    const b = ensureBridge(join(surfDir, 'src', 'bridge.js'))
+    if (b === 'started') done.push('桥接拉起来了')
+  }
+  console.log('')
+  if (done.length) {
+    for (const d of done) console.log(`  ⚒ ${d}`)
+    console.log('')
+    console.log('  修完了。再跑一次 node check.mjs 看通不通。')
+  } else {
+    console.log('  这些断点没有能自动修的，按上面 → 一条条来。')
+  }
   console.log('')
 }
 
