@@ -24,7 +24,9 @@ const CFG_PATH = join(HERE, 'chain.config.json')
 const IS_WIN = platform() === 'win32'
 const JSON_OUT = process.argv.includes('--json')
 const WANT_HELP = process.argv.includes('--help') || process.argv.includes('-h')
-const WANT_FIX = process.argv.includes('--fix')
+// 两种写法都认：`node check.mjs --fix` 和 `node check.mjs fix`。
+// 子命令形式更好记，也不占一个长选项的名字。位置不限，写在 --json 后面也认。
+const WANT_FIX = process.argv.includes('--fix') || process.argv.slice(2).includes('fix')
 
 // ── 换个 Node 版本就跑不动的话，得先说人话，别甩一串 SyntaxError ─────────────
 const NODE_MAJOR = Number(process.versions.node.split('.')[0])
@@ -40,7 +42,9 @@ dsh-chain-check —— 看 DSH → 桥接 → SnowLuma → QQ 这条链断在哪
 
   node check.mjs            人看的
   node check.mjs --json     机器看的（退出码 0 = 全通，1 = 有不通的）
-  node check.mjs --fix      能自动修的顺手修掉（改 baseUrl、拉起桥接、去掉重复 SnowLuma）
+  node check.mjs fix        能自动修的顺手修掉（改 baseUrl、拉起桥接）
+  node check.mjs --fix      同上，老写法还认
+  node check.mjs port       只要当前 DSH 端口号（原来那个 find-dsh-port.mjs 并进来了）
   node check.mjs --help     这段
 
 可选配置：同目录 chain.config.json，或者环境变量
@@ -116,27 +120,43 @@ const results = []
 const add = (key, name, ok, detail, fix = '') => results.push({ key, name, ok, detail, fix })
 
 // 探针：netstat 看不见端口时，靠「能不能回答 DSH 特征请求」认。
-// GET /dsh-world/console/snapshot 返回里带 "worldId" 就是它。
-// 不靠端口号猜、不靠进程名——SnowLuma 的 3000 也监听，但它答不出这个。
+// 两条路，依次试：
+//   1. GET /dsh-world/console/snapshot 返回里带 "worldId"（装了 dsh-world 才有）
+//   2. GET / 返回 "dsh web authentication required"（没装 dsh-world 时只剩这条）
+// 2026-11-02 补第二条：dsh-world 被禁用之后，原来只看 snapshot 的探针全瞎了，
+// 扫 6 万个端口一个都认不出来——而 DSH 其实好好地跑着。探针认不出不等于没起。
+// 不靠端口号猜、不靠进程名——SnowLuma 的 3000 两条都答不出。
 function probeDshPort(port) {
   return new Promise((resolve) => {
+    const viaRoot = () => {
+      const req = http.get(
+        { host: '127.0.0.1', port, path: '/', timeout: 700 },
+        (res) => {
+          let body = ''
+          res.on('data', (c) => { body += c; if (body.length > 4000) req.destroy() })
+          res.on('end', () => resolve(/dsh web authentication required|DeepSeek Harness/i.test(body) ? port : null))
+          res.on('error', () => resolve(null))
+        },
+      )
+      req.on('timeout', () => { req.destroy(); resolve(null) })
+      req.on('error', () => resolve(null))
+    }
     const req = http.get(
       { host: '127.0.0.1', port, path: '/dsh-world/console/snapshot', timeout: 700 },
       (res) => {
         let body = ''
         res.on('data', (c) => { body += c; if (body.length > 4000) req.destroy() })
-        res.on('end', () => resolve(body.includes('"worldId"') ? port : null))
-        res.on('error', () => resolve(null))
+        res.on('end', () => (body.includes('"worldId"') ? resolve(port) : viaRoot()))
+        res.on('error', viaRoot)
       },
     )
-    req.on('timeout', () => { req.destroy(); resolve(null) })
-    req.on('error', () => resolve(null))
+    req.on('timeout', () => { req.destroy(); viaRoot() })
+    req.on('error', viaRoot)
   })
 }
 
-async function scanDshPort() {
-  const all = []
-  for (let p = 1000; p <= 65535; p++) all.push(p)
+async function scanDshPort(only) {
+  const all = only && only.length ? only : Array.from({ length: 65535 - 1000 + 1 }, (_, i) => 1000 + i)
   let i = 0
   const found = []
   await Promise.all(Array.from({ length: 400 }, async () => {
@@ -145,7 +165,33 @@ async function scanDshPort() {
       if (await probeDshPort(p)) found.push(p)
     }
   }))
-  return found.sort((x, y) => x - y)[0] ?? null
+  return found.sort((x, y) => x - y)
+}
+
+// ── 子命令：port ──────────────────────────────────────────────────────────
+// 只要端口号，别的都不查。原来这是个单独的 find-dsh-port.mjs，
+// 并进来的理由很简单：一条命令能问两件事，不用记两个文件名。
+// 输出只有端口号（空格分隔），方便脚本里直接 $() 取。
+//   node check.mjs port                扫 1000-65535
+//   node check.mjs port 2000 60000     自定范围
+//   node check.mjs port 1916,3000      只探这几个（最快）
+const ARGV = process.argv.slice(2)
+if (ARGV.includes('port')) {
+  const nums = ARGV.filter((a) => a !== 'port' && !a.startsWith('-'))
+  let only = null
+  if (nums[0]?.includes(',')) {
+    only = nums[0].split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0 && n < 65536)
+  } else if (nums.length >= 1) {
+    const a = Number(nums[0])
+    const b = nums.length >= 2 ? Number(nums[1]) : a
+    if (Number.isInteger(a) && Number.isInteger(b) && a > 0 && b < 65536 && a <= b) {
+      only = Array.from({ length: b - a + 1 }, (_, i) => a + i)
+    }
+  }
+  const found = await scanDshPort(only)
+  if (found.length) console.log(found.join(' '))
+  else { console.error('没找到 DSH'); process.exit(1) }
+  process.exit(0)
 }
 
 // 1) DSH 进程 + 端口
@@ -208,9 +254,9 @@ async function checkDSH() {
       guesses.push(`DSH 端口用了 chain.config.json 的 dshPort=${cfgNow.dshPort}`)
     } else {
       const found = await scanDshPort()
-      if (found) {
-        ports = [found]
-        guesses.push(`DSH 端口是探针扫出来的：${found}（netstat 看不见它，建议写进 chain.config.json 的 dshPort）`)
+      if (found.length) {
+        ports = found
+        guesses.push(`DSH 端口是探针扫出来的：${found.join('、')}（netstat 看不见它，建议写进 chain.config.json 的 dshPort）`)
       }
     }
   }
